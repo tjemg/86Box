@@ -9,10 +9,9 @@
  *          Host USB floppy support via block device I/O.
  *
  *          This module provides host floppy device support with:
- *          - Device size detection for proper floppy geometry
- *          - Support for disk swapping at runtime
+ *          - Device size/geometry detection
  *          - Read/write on sector-level
- *          - Caching read/write for better performance
+ *          - Read caching with prefetch on tracks
  *
  * Authors: Tiago Gasiba <tiga@FreeBSD.org>
  *
@@ -43,10 +42,11 @@
 #include <86box/plat_floppy_ioctl.h>
 
 #define FLOPPY_IOCTL_DEBUG 0
+#define LOG_PREFIX "[FLOPPY_IOCTL] "
 
 #if FLOPPY_IOCTL_DEBUG
 #define floppy_ioctl_log(...) do { \
-    fprintf(stderr, "[FLOPPY_IOCTL] "); \
+    fprintf(stderr, LOG_PREFIX); \
     fprintf(stderr, __VA_ARGS__); \
     fflush(stderr); \
 } while(0)
@@ -222,8 +222,8 @@ floppy_ioctl_open(int drive, int *out_tracks, int *out_sides, int *out_sectors, 
         /* Try read-only */
         fd = open(path, O_RDONLY | O_NONBLOCK | O_EXLOCK);
         if (fd < 0) {
-            fprintf(stderr, "[FLOPPY_IOCTL] Failed to open %s: %s\n", path, strerror(errno));
-            fprintf(stderr, "[FLOPPY_IOCTL] Hint: device node may have changed after disk swap\n");
+            fprintf(stderr, LOG_PREFIX "Failed to open %s: %s\n", path, strerror(errno));
+            fprintf(stderr, LOG_PREFIX "Hint: device node may have changed after disk swap\n");
             return 0;
         }
         state->readonly = 1;
@@ -316,7 +316,12 @@ floppy_ioctl_read_sector(int drive, int track, int side, int sector, uint8_t *bu
     floppy_ioctl_state_t *state;
     off_t offset;
     ssize_t ret;
+    size_t bytes_read;
     int sector_index;
+    int total_sectors;
+    int sectors_to_read;
+    int read_start;
+    int i;
 
     if (drive < 0 || drive >= FDD_NUM)
         return 0;
@@ -350,26 +355,77 @@ floppy_ioctl_read_sector(int drive, int track, int side, int sector, uint8_t *bu
         return 1;
     }
 
+    total_sectors = state->tracks * state->sides * state->sectors;
+    read_start = (track * state->sides + side) * state->sectors;
+    sectors_to_read = state->sectors;
+
+    if (read_start + sectors_to_read > total_sectors)
+        sectors_to_read = total_sectors - read_start;
+
+    if (state->buffer && state->sector_valid && sectors_to_read > 0) {
+        off_t read_offset = (off_t)read_start * SECTOR_SIZE;
+        size_t bytes_to_read = sectors_to_read * SECTOR_SIZE;
+        bytes_read = 0;
+
+        if (lseek(state->fd, read_offset, SEEK_SET) != read_offset) {
+            floppy_ioctl_log("  lseek failed: %s\n", strerror(errno));
+            return 0;
+        }
+
+        while (bytes_read < bytes_to_read) {
+            ret = read(state->fd, state->buffer + read_offset + bytes_read,
+                       bytes_to_read - bytes_read);
+            if (ret < 0) {
+                floppy_ioctl_log("  read error: %s\n", strerror(errno));
+                break;
+            }
+            if (ret == 0) {
+                floppy_ioctl_log("  unexpected EOF after %zu bytes\n", bytes_read);
+                break;
+            }
+            bytes_read += ret;
+
+            for (i = 0; i < (int)(bytes_read / SECTOR_SIZE); i++)
+                state->sector_valid[read_start + i] = 1;
+
+            if (state->sector_valid[sector_index])
+                break;
+        }
+
+        floppy_ioctl_log("  track read: %zu bytes (%d sectors)\n",
+                         bytes_read, (int)(bytes_read / SECTOR_SIZE));
+
+        if (!state->sector_valid[sector_index]) {
+            floppy_ioctl_log("  requested sector %d not readable\n", sector_index);
+            return 0;
+        }
+
+        memcpy(buffer, state->buffer + offset, SECTOR_SIZE);
+        return 1;
+    }
+
+    /* single sector read (no caching available) */
+    bytes_read = 0;
+
     if (lseek(state->fd, offset, SEEK_SET) != offset) {
         floppy_ioctl_log("  lseek failed: %s\n", strerror(errno));
         return 0;
     }
 
-    ret = read(state->fd, buffer, SECTOR_SIZE);
-    if (ret != SECTOR_SIZE) {
-        floppy_ioctl_log("  read returned %zd (expected %d): %s\n",
-                         ret, SECTOR_SIZE, ret < 0 ? strerror(errno) : "short read");
-        return 0;
+    while (bytes_read < SECTOR_SIZE) {
+        ret = read(state->fd, buffer + bytes_read, SECTOR_SIZE - bytes_read);
+        if (ret < 0) {
+            floppy_ioctl_log("  read error: %s\n", strerror(errno));
+            return 0;
+        }
+        if (0 == ret) {
+            floppy_ioctl_log("  unexpected EOF after %zu bytes\n", bytes_read);
+            return 0;
+        }
+        bytes_read += ret;
     }
 
-    if (state->buffer && state->sector_valid) {
-        memcpy(state->buffer + offset, buffer, SECTOR_SIZE);
-        state->sector_valid[sector_index] = 1;
-        floppy_ioctl_log("  read OK, cached\n");
-    } else {
-        floppy_ioctl_log("  read OK\n");
-    }
-
+    floppy_ioctl_log("  read OK (unbuffered)\n");
     return 1;
 }
 
