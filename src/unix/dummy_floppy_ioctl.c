@@ -63,12 +63,6 @@ floppy_ioctl_close(int drive)
 }
 
 int
-floppy_ioctl_media_present(int drive)
-{
-    return 0;
-}
-
-int
 floppy_ioctl_read_sector(int drive, int track, int side, int sector, uint8_t *buffer)
 {
     return 0;
@@ -76,12 +70,6 @@ floppy_ioctl_read_sector(int drive, int track, int side, int sector, uint8_t *bu
 
 int
 floppy_ioctl_write_sector(int drive, int track, int side, int sector, const uint8_t *buffer)
-{
-    return 0;
-}
-
-int
-floppy_ioctl_get_geometry(int drive, int *tracks, int *sides, int *sectors)
 {
     return 0;
 }

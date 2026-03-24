@@ -40,6 +40,7 @@
 #include <86box/fdd_86f.h>
 #include <86box/fdd_img.h>
 #include <86box/fdc.h>
+#include <86box/plat_floppy_ioctl.h>
 
 typedef struct img_t {
     FILE    *fp;
@@ -64,6 +65,8 @@ typedef struct img_t {
     uint8_t  disk_at_once;
     uint8_t  interleave;
     uint8_t  skew;
+    uint8_t  is_ioctl;
+    int      ioctl_drive;
 } img_t;
 
 
@@ -419,6 +422,16 @@ write_back(int drive)
     int    ssize = 128 << ((int) dev->sector_size);
     int    size;
 
+    if (dev->is_ioctl) {
+        for (int side = 0; side < dev->sides; side++) {
+            for (int sector = 0; sector < dev->sectors; sector++) {
+                floppy_ioctl_write_sector(dev->ioctl_drive, dev->track, side, sector + 1,
+                                          &dev->track_data[side][sector * ssize]);
+            }
+        }
+        return;
+    }
+
     if (dev->fp == NULL)
         return;
 
@@ -516,7 +529,7 @@ img_seek(int drive, int track)
     current_xdft = dev->xdf_type - 1;
     ssize = 128 << ((int) dev->sector_size);
 
-    if (dev->fp == NULL)
+    if (dev->fp == NULL && !dev->is_ioctl)
         return;
 
     if (!dev->track_width && fdd_doublestep_40(drive))
@@ -527,19 +540,29 @@ img_seek(int drive, int track)
 
     is_t0 = (track == 0) ? 1 : 0;
 
-    if (!dev->disk_at_once) {
+    if (dev->is_ioctl) {
+        /* Read track data using ioctl sector-by-sector */
+        for (side = 0; side < dev->sides; side++) {
+            for (sector = 0; sector < dev->sectors; sector++) {
+                if (!floppy_ioctl_read_sector(dev->ioctl_drive, track, side, sector + 1,
+                                              &dev->track_data[side][sector * ssize])) {
+                    memset(&dev->track_data[side][sector * ssize], 0xf6, ssize);
+                }
+            }
+        }
+    } else if (!dev->disk_at_once) {
         if (fseek(dev->fp, dev->base + (track * dev->sectors * ssize * dev->sides), SEEK_SET) == -1)
             fatal("img_seek(): Error seeking\n");
-    }
 
-    for (side = 0; side < dev->sides; side++) {
-        if (dev->disk_at_once) {
-            cur_pos = (track * dev->sectors * ssize * dev->sides) + (side * dev->sectors * ssize);
-            memcpy(dev->track_data[side], dev->disk_data + cur_pos, (size_t) dev->sectors * ssize);
-        } else {
+        for (side = 0; side < dev->sides; side++) {
             read_bytes = fread(dev->track_data[side], 1, (size_t) dev->sectors * ssize, dev->fp);
             if (read_bytes < (dev->sectors * ssize))
                 memset(dev->track_data[side] + read_bytes, 0xf6, (dev->sectors * ssize) - read_bytes);
+        }
+    } else {
+        for (side = 0; side < dev->sides; side++) {
+            cur_pos = (track * dev->sectors * ssize * dev->sides) + (side * dev->sectors * ssize);
+            memcpy(dev->track_data[side], dev->disk_data + cur_pos, (size_t) dev->sectors * ssize);
         }
     }
 
@@ -1277,7 +1300,9 @@ img_close(int drive)
 
     d86f_unregister(drive);
 
-    if (dev->fp != NULL) {
+    if (dev->is_ioctl) {
+        floppy_ioctl_close(dev->ioctl_drive);
+    } else if (dev->fp != NULL) {
         fclose(dev->fp);
         dev->fp = NULL;
     }
@@ -1301,25 +1326,21 @@ void
 img_load_raw_device(int drive, const char *device_path, int64_t size)
 {
     img_t *dev;
-    FILE *fp;
     int temp_rate = 0;
 
     d86f_unregister(drive);
     writeprot[drive] = 0;
 
-    fp = fopen(device_path, "rb+");
-    if (fp == NULL) {
-        fp = fopen(device_path, "rb");
-        if (fp == NULL) {
-            memset(floppyfns[drive], 0, sizeof(floppyfns[drive]));
-            return;
-        }
-        writeprot[drive] = 1;
+    /* Set up the host device path and open via ioctl */
+    fdd_set_host_device(drive, device_path);
+    if (!floppy_ioctl_open(drive)) {
+        memset(floppyfns[drive], 0, sizeof(floppyfns[drive]));
+        return;
     }
 
     dev = (img_t *) calloc(1, sizeof(img_t));
     if (dev == NULL) {
-        fclose(fp);
+        floppy_ioctl_close(drive);
         memset(floppyfns[drive], 0, sizeof(floppyfns[drive]));
         return;
     }
@@ -1341,7 +1362,9 @@ img_load_raw_device(int drive, const char *device_path, int64_t size)
         {  163840, 40, 1,  8, 1 },  /* 160 KB SD */
     };
 
-    dev->fp = fp;
+    dev->fp = NULL;
+    dev->is_ioctl = 1;
+    dev->ioctl_drive = drive;
     dev->base = 0;
     dev->interleave = 0;
     dev->skew = 0;
@@ -1365,7 +1388,7 @@ img_load_raw_device(int drive, const char *device_path, int64_t size)
 
     if (!found) {
         img_log("img_load_raw_device(): Unknown disk size %lld bytes, ejecting\n", (long long)size);
-        fclose(fp);
+        floppy_ioctl_close(drive);
         free(dev);
         memset(floppyfns[drive], 0, sizeof(floppyfns[drive]));
         return;

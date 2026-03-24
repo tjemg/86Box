@@ -64,6 +64,10 @@
 
 #define SECTOR_SIZE 512
 
+/* Note: we keep the state of the actual disk that is on the drive,
+   which might be different from the configuration in the VM,
+   e.g. when putting a 720KB disk in a drive configured for 1.44MB.
+*/
 typedef struct floppy_ioctl_state_t {
     int      fd;              /* File descriptor (-1 if closed) */
     int      tracks;          /* Geometry */
@@ -330,22 +334,6 @@ floppy_ioctl_close(int drive)
 }
 
 int
-floppy_ioctl_media_present(int drive)
-{
-    floppy_ioctl_state_t *state;
-
-    if (drive < 0 || drive >= FDD_NUM)
-        return 0;
-
-    state = &floppy_state[drive];
-
-    if (state->fd < 0)
-        return 0;
-
-    return state->media_present;
-}
-
-int
 floppy_ioctl_read_sector(int drive, int track, int side, int sector, uint8_t *buffer)
 {
     floppy_ioctl_state_t *state;
@@ -460,29 +448,6 @@ floppy_ioctl_write_sector(int drive, int track, int side, int sector, const uint
     } else {
         floppy_ioctl_log("  write OK\n");
     }
-
-    return 1;
-}
-
-int
-floppy_ioctl_get_geometry(int drive, int *tracks, int *sides, int *sectors)
-{
-    floppy_ioctl_state_t *state;
-
-    if (drive < 0 || drive >= FDD_NUM)
-        return 0;
-
-    state = &floppy_state[drive];
-
-    if (state->fd < 0)
-        return 0;
-
-    *tracks = state->tracks;
-    *sides = state->sides;
-    *sectors = state->sectors;
-
-    floppy_ioctl_log("floppy_ioctl_get_geometry(%d): %d/%d/%d\n", 
-                     drive, *tracks, *sides, *sectors);
 
     return 1;
 }
