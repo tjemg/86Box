@@ -73,10 +73,9 @@ typedef struct floppy_ioctl_state_t {
     int      tracks;          /* Geometry */
     int      sides;
     int      sectors;
-    int64_t  device_size;     /* Device size in bytes */
+    int      rate;
     int      media_present;   /* Is a disk in the drive? */
     int      readonly;        /* Is the device read-only? */
-    char     path[256];       /* Device path */
     uint8_t *buffer;          /* Cached disk image */
     uint8_t *sector_valid;    /* 1 = sector cached, 0 = not cached */
 } floppy_ioctl_state_t;
@@ -154,46 +153,25 @@ get_device_size(int fd)
     return size;
 }
 
-/* Get the size of a device by path */
-int64_t
-floppy_ioctl_get_device_size(const char *path)
-{
-    int fd;
-    int64_t size;
-
-    floppy_ioctl_log("floppy_ioctl_get_device_size(\"%s\")\n", path);
-
-    fd = open(path, O_RDONLY | O_NONBLOCK);
-    if (fd < 0) {
-        floppy_ioctl_log("  open failed: %s\n", strerror(errno));
-        return -1;
-    }
-
-    size = get_device_size(fd);
-    close(fd);
-
-    floppy_ioctl_log("  result: %lld bytes\n", (long long)size);
-    return size;
-}
-
 static int
-detect_geometry(int64_t size, int *tracks, int *sides, int *sectors)
+detect_geometry(int64_t size, int *tracks, int *sides, int *sectors, int *rate)
 {
     static const struct {
         int64_t size;
         int tracks;
         int sides;
         int sectors;
+        int rate;
     } geometries[] = {
-        { FLOPPY_SIZE_2880KB, 80, 2, 36 },
-        { FLOPPY_SIZE_1440KB, 80, 2, 18 },
-        { FLOPPY_SIZE_1200KB, 80, 2, 15 },
-        { FLOPPY_SIZE_720KB,  80, 2,  9 },
-        { FLOPPY_SIZE_360KB,  40, 2,  9 },
-        { FLOPPY_SIZE_320KB,  40, 2,  8 },
-        { FLOPPY_SIZE_180KB,  40, 1,  9 },
-        { FLOPPY_SIZE_160KB,  40, 1,  8 },
-        { 0, 0, 0, 0 }
+        { FLOPPY_SIZE_2880KB, 80, 2, 36, 3 },
+        { FLOPPY_SIZE_1440KB, 80, 2, 18, 0 },
+        { FLOPPY_SIZE_1200KB, 80, 2, 15, 0 },
+        { FLOPPY_SIZE_720KB,  80, 2,  9, 2 },
+        { FLOPPY_SIZE_360KB,  40, 2,  9, 1 },
+        { FLOPPY_SIZE_320KB,  40, 2,  8, 1 },
+        { FLOPPY_SIZE_180KB,  40, 1,  9, 1 },
+        { FLOPPY_SIZE_160KB,  40, 1,  8, 1 },
+        { 0, 0, 0, 0, 0 }
     };
 
     for (int i = 0; geometries[i].size != 0; i++) {
@@ -201,8 +179,9 @@ detect_geometry(int64_t size, int *tracks, int *sides, int *sectors)
             *tracks = geometries[i].tracks;
             *sides = geometries[i].sides;
             *sectors = geometries[i].sectors;
-            floppy_ioctl_log("detect_geometry: size=%lld (%dT/%dH/%dS)\n",
-                             (long long)size, *tracks, *sides, *sectors);
+            *rate = geometries[i].rate;
+            floppy_ioctl_log("detect_geometry: size=%lld (%dT/%dH/%dS rate=%d)\n",
+                             (long long)size, *tracks, *sides, *sectors, *rate);
             return 1;
         }
     }
@@ -212,7 +191,7 @@ detect_geometry(int64_t size, int *tracks, int *sides, int *sectors)
 }
 
 int
-floppy_ioctl_open(int drive)
+floppy_ioctl_open(int drive, int *out_tracks, int *out_sides, int *out_sectors, int *out_rate)
 {
     floppy_ioctl_state_t *state;
     const char *path;
@@ -258,16 +237,14 @@ floppy_ioctl_open(int drive)
 
     size = get_device_size(fd);
     if (size <= 0 || size > FLOPPY_SIZE_2880KB ||
-        !detect_geometry(size, &state->tracks, &state->sides, &state->sectors)) {
+        !detect_geometry(size, &state->tracks, &state->sides, &state->sectors, &state->rate)) {
         floppy_ioctl_log("  not a floppy\n");
         close(fd);
         return 0;
     }
 
     state->fd = fd;
-    state->device_size = size;
     state->media_present = 1;
-    strncpy(state->path, path, sizeof(state->path) - 1);
 
     if (floppy_buffering_enabled) {
         int total_sectors = state->tracks * state->sides * state->sectors;
@@ -292,9 +269,14 @@ floppy_ioctl_open(int drive)
         fwriteprot[drive] = 1;
     }
 
-    floppy_ioctl_log("  SUCCESS: fd=%d, size=%lld, geometry=%d/%d/%d, readonly=%d\n",
-                     state->fd, (long long)state->device_size, 
-                     state->tracks, state->sides, state->sectors, state->readonly);
+    *out_tracks = state->tracks;
+    *out_sides = state->sides;
+    *out_sectors = state->sectors;
+    *out_rate = state->rate;
+
+    floppy_ioctl_log("  SUCCESS: fd=%d, size=%lld, geometry=%d/%d/%d, rate=%d, readonly=%d\n",
+                     state->fd, (long long)size, 
+                     state->tracks, state->sides, state->sectors, state->rate, state->readonly);
 
     return 1;
 }
@@ -327,7 +309,6 @@ floppy_ioctl_close(int drive)
     }
 
     state->media_present = 0;
-    state->device_size = 0;
     state->tracks = 0;
     state->sides = 0;
     state->sectors = 0;

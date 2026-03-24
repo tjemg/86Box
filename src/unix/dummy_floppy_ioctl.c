@@ -45,14 +45,8 @@ fdd_get_host_device(int drive)
     return fdd_host_device[drive];
 }
 
-int64_t
-floppy_ioctl_get_device_size(const char *path)
-{
-    return -1;
-}
-
 int
-floppy_ioctl_open(int drive)
+floppy_ioctl_open(int drive, int *out_tracks, int *out_sides, int *out_sectors, int *out_rate)
 {
     return 0;
 }

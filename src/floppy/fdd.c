@@ -674,17 +674,6 @@ fdd_load(int drive, char *fn)
     /* Check for physical floppy device (ioctl://) prefix */
     if (strstr(fn, "ioctl://") == fn) {
         const char *device_path = fn + 8;
-        int64_t dev_size;
-        
-        dev_size = floppy_ioctl_get_device_size(device_path);
-        
-        if (dev_size <= 0) {
-            drive_empty[drive] = 1;
-            fdd_set_head(drive, 0);
-            memset(floppyfns[drive], 0, sizeof(floppyfns[drive]));
-            ui_sb_update_icon_state(SB_FLOPPY | drive, 1);
-            return;
-        }
         
         if (floppyfns[drive] != (fn - offs)) {
             strncpy(floppyfns[drive], fn - offs, sizeof(floppyfns[drive]) - 1);
@@ -693,7 +682,15 @@ fdd_load(int drive, char *fn)
         
         d86f_setup(drive);
         
-        img_load_raw_device(drive, device_path, dev_size);
+        img_load_raw_device(drive, device_path);
+        
+        if (floppyfns[drive][0] == '\0') {
+            drive_empty[drive] = 1;
+            fdd_set_head(drive, 0);
+            ui_sb_update_icon_state(SB_FLOPPY | drive, 1);
+            return;
+        }
+        
         drive_empty[drive] = 0;
         
         fdd_forced_seek(drive, 0);
