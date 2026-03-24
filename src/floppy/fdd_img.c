@@ -541,11 +541,11 @@ img_seek(int drive, int track)
     is_t0 = (track == 0) ? 1 : 0;
 
     if (dev->is_ioctl) {
-        /* Read track data using ioctl sector-by-sector */
         for (side = 0; side < dev->sides; side++) {
             for (sector = 0; sector < dev->sectors; sector++) {
                 if (!floppy_ioctl_read_sector(dev->ioctl_drive, track, side, sector + 1,
                                               &dev->track_data[side][sector * ssize])) {
+                    /* initialize with 0xf6 as per INT 0x1e Disk Parameter Table */
                     memset(&dev->track_data[side][sector * ssize], 0xf6, ssize);
                 }
             }
@@ -557,6 +557,7 @@ img_seek(int drive, int track)
         for (side = 0; side < dev->sides; side++) {
             read_bytes = fread(dev->track_data[side], 1, (size_t) dev->sectors * ssize, dev->fp);
             if (read_bytes < (dev->sectors * ssize))
+                /* initialize with 0xf6 as per INT 0x1e Disk Parameter Table */
                 memset(dev->track_data[side] + read_bytes, 0xf6, (dev->sectors * ssize) - read_bytes);
         }
     } else {
@@ -1345,20 +1346,15 @@ img_load_raw_device(int drive, const char *device_path)
         return;
     }
 
-    dev->fp = NULL;
-    dev->is_ioctl = 1;
-    dev->ioctl_drive = drive;
-    dev->base = 0;
-    dev->interleave = 0;
-    dev->skew = 0;
-    dev->sector_size = 2;  /* 512 bytes */
-    dev->xdf_type = 0;
-    dev->dmf = 0;
-    dev->disk_at_once = 0;
-    dev->is_cqm = 0;
-    dev->tracks = tracks;
-    dev->sides = sides;
-    dev->sectors = sectors;
+    *dev = (img_t){
+        .fp          = NULL,
+        .is_ioctl    = 1,
+        .ioctl_drive = drive,
+        .sector_size = 2,  /* 512 bytes */
+        .tracks      = tracks,
+        .sides       = sides,
+        .sectors     = sectors
+    };
 
     if (ui_writeprot[drive])
         writeprot[drive] = 1;

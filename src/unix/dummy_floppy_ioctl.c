@@ -23,26 +23,15 @@
 #include <86box/fdd.h>
 #include <86box/plat_floppy_ioctl.h>
 
-/* Host device path storage */
-char fdd_host_device[FDD_NUM][256];
-
 void
 fdd_set_host_device(int drive, const char *path)
 {
-    if (drive < 0 || drive >= FDD_NUM)
-        return;
-    if (path)
-        strncpy(fdd_host_device[drive], path, sizeof(fdd_host_device[drive]) - 1);
-    else
-        fdd_host_device[drive][0] = '\0';
 }
 
 const char *
 fdd_get_host_device(int drive)
 {
-    if (drive < 0 || drive >= FDD_NUM)
-        return "";
-    return fdd_host_device[drive];
+    return "";
 }
 
 int

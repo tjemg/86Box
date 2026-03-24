@@ -21,8 +21,6 @@
 extern "C" {
 #endif
 
-extern char fdd_host_device[FDD_NUM][256];
-
 extern void fdd_set_host_device(int drive, const char *path);
 extern const char *fdd_get_host_device(int drive);
 extern void floppy_ioctl_set_buffering(int enabled);

@@ -6,12 +6,13 @@
  *
  *          This file is part of the 86Box distribution.
  *
- *          USB floppy support via block device I/O.
+ *          Host USB floppy support via block device I/O.
  *
  *          This module provides host floppy device support with:
- *          - Device enumeration for settings dialog
  *          - Device size detection for proper floppy geometry
  *          - Support for disk swapping at runtime
+ *          - Read/write on sector-level
+ *          - Caching read/write for better performance
  *
  * Authors: Tiago Gasiba <tiga@FreeBSD.org>
  *
@@ -74,16 +75,14 @@ typedef struct floppy_ioctl_state_t {
     int      sides;
     int      sectors;
     int      rate;
-    int      media_present;   /* Is a disk in the drive? */
     int      readonly;        /* Is the device read-only? */
     uint8_t *buffer;          /* Cached disk image */
     uint8_t *sector_valid;    /* 1 = sector cached, 0 = not cached */
+    char     host_device[256];
 } floppy_ioctl_state_t;
 
 static floppy_ioctl_state_t floppy_state[FDD_NUM];
-static int floppy_buffering_enabled = 0;
-
-char fdd_host_device[FDD_NUM][256];
+static int floppy_buffering_enabled = 1;
 
 void
 fdd_set_host_device(int drive, const char *path)
@@ -91,11 +90,11 @@ fdd_set_host_device(int drive, const char *path)
     if (drive < 0 || drive >= FDD_NUM)
         return;
     if (path) {
-        strncpy(fdd_host_device[drive], path, sizeof(fdd_host_device[drive]) - 1);
-        fdd_host_device[drive][sizeof(fdd_host_device[drive]) - 1] = '\0';
+        strncpy(floppy_state[drive].host_device, path, sizeof(floppy_state[drive].host_device) - 1);
+        floppy_state[drive].host_device[sizeof(floppy_state[drive].host_device) - 1] = '\0';
         floppy_ioctl_log("fdd_set_host_device(%d, \"%s\")\n", drive, path);
     } else {
-        fdd_host_device[drive][0] = '\0';
+        floppy_state[drive].host_device[0] = '\0';
         floppy_ioctl_log("fdd_set_host_device(%d, NULL)\n", drive);
     }
 }
@@ -105,7 +104,7 @@ fdd_get_host_device(int drive)
 {
     if (drive < 0 || drive >= FDD_NUM)
         return "";
-    return fdd_host_device[drive];
+    return floppy_state[drive].host_device;
 }
 
 void
@@ -121,7 +120,6 @@ floppy_ioctl_get_buffering(void)
     return floppy_buffering_enabled;
 }
 
-/* Get the size of a block device */
 static int64_t
 get_device_size(int fd)
 {
@@ -142,10 +140,10 @@ get_device_size(int fd)
     int r2 = ioctl(fd, DKIOCGETBLOCKSIZE, &blocksize);
     if (r1 == 0 && r2 == 0) {
         size = (int64_t)blockcount * blocksize;
-        floppy_ioctl_log("get_device_size: macOS blockcount=%llu, blocksize=%u, total=%lld\n", 
+        floppy_ioctl_log("get_device_size: macOS blockcount=%llu, blocksize=%u, total=%lld\n",
                          (unsigned long long)blockcount, blocksize, (long long)size);
     } else {
-        floppy_ioctl_log("get_device_size: macOS DKIOCGETBLOCK* failed: r1=%d r2=%d errno=%s\n", 
+        floppy_ioctl_log("get_device_size: macOS DKIOCGETBLOCK* failed: r1=%d r2=%d errno=%s\n",
                          r1, r2, strerror(errno));
     }
 #endif
@@ -206,7 +204,7 @@ floppy_ioctl_open(int drive, int *out_tracks, int *out_sides, int *out_sectors, 
     }
 
     state = &floppy_state[drive];
-    path = fdd_host_device[drive];
+    path = floppy_state[drive].host_device;
 
     floppy_ioctl_close(drive);
 
@@ -244,7 +242,6 @@ floppy_ioctl_open(int drive, int *out_tracks, int *out_sides, int *out_sectors, 
     }
 
     state->fd = fd;
-    state->media_present = 1;
 
     if (floppy_buffering_enabled) {
         int total_sectors = state->tracks * state->sides * state->sectors;
@@ -275,7 +272,7 @@ floppy_ioctl_open(int drive, int *out_tracks, int *out_sides, int *out_sectors, 
     *out_rate = state->rate;
 
     floppy_ioctl_log("  SUCCESS: fd=%d, size=%lld, geometry=%d/%d/%d, rate=%d, readonly=%d\n",
-                     state->fd, (long long)size, 
+                     state->fd, (long long)size,
                      state->tracks, state->sides, state->sectors, state->rate, state->readonly);
 
     return 1;
@@ -308,7 +305,6 @@ floppy_ioctl_close(int drive)
         state->sector_valid = NULL;
     }
 
-    state->media_present = 0;
     state->tracks = 0;
     state->sides = 0;
     state->sectors = 0;
@@ -327,17 +323,17 @@ floppy_ioctl_read_sector(int drive, int track, int side, int sector, uint8_t *bu
 
     state = &floppy_state[drive];
 
-    if (state->fd < 0 || !state->media_present) {
-        floppy_ioctl_log("floppy_ioctl_read_sector(%d, %d, %d, %d): fd=%d media_present=%d FAIL\n",
-                         drive, track, side, sector, state->fd, state->media_present);
+    if (state->fd < 0) {
+        floppy_ioctl_log("floppy_ioctl_read_sector(%d, %d, %d, %d): fd=%d FAIL\n",
+                         drive, track, side, sector, state->fd);
         return 0;
     }
 
-    if (track >= state->tracks || side >= state->sides || 
+    if (track >= state->tracks || side >= state->sides ||
         sector < 1 || sector > state->sectors) {
         floppy_ioctl_log("floppy_ioctl_read_sector(%d, %d, %d, %d): geometry violation "
                          "(max %d/%d/%d) FAIL\n",
-                         drive, track, side, sector, 
+                         drive, track, side, sector,
                          state->tracks, state->sides, state->sectors);
         return 0;
     }
@@ -361,7 +357,7 @@ floppy_ioctl_read_sector(int drive, int track, int side, int sector, uint8_t *bu
 
     ret = read(state->fd, buffer, SECTOR_SIZE);
     if (ret != SECTOR_SIZE) {
-        floppy_ioctl_log("  read returned %zd (expected %d): %s\n", 
+        floppy_ioctl_log("  read returned %zd (expected %d): %s\n",
                          ret, SECTOR_SIZE, ret < 0 ? strerror(errno) : "short read");
         return 0;
     }
@@ -390,15 +386,15 @@ floppy_ioctl_write_sector(int drive, int track, int side, int sector, const uint
 
     state = &floppy_state[drive];
 
-    if (state->fd < 0 || !state->media_present || state->readonly) {
+    if (state->fd < 0 || state->readonly) {
         floppy_ioctl_log("floppy_ioctl_write_sector(%d, %d, %d, %d): "
-                         "fd=%d media=%d readonly=%d FAIL\n",
-                         drive, track, side, sector, 
-                         state->fd, state->media_present, state->readonly);
+                         "fd=%d readonly=%d FAIL\n",
+                         drive, track, side, sector,
+                         state->fd, state->readonly);
         return 0;
     }
 
-    if (track >= state->tracks || side >= state->sides || 
+    if (track >= state->tracks || side >= state->sides ||
         sector < 1 || sector > state->sectors) {
         floppy_ioctl_log("floppy_ioctl_write_sector(%d, %d, %d, %d): geometry violation FAIL\n",
                          drive, track, side, sector);
@@ -439,9 +435,8 @@ floppy_ioctl_init(void)
     floppy_ioctl_log("floppy_ioctl_init()\n");
     for (int i = 0; i < FDD_NUM; i++) {
         floppy_state[i].fd = -1;
-        floppy_state[i].media_present = 0;
         floppy_state[i].buffer = NULL;
         floppy_state[i].sector_valid = NULL;
-        fdd_host_device[i][0] = '\0';
+        floppy_state[i].host_device[0] = '\0';
     }
 }
